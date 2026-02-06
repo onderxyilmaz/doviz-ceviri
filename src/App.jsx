@@ -29,15 +29,36 @@ async function apiFetch(start, end, base) {
 }
 
 async function fetchLatestRate(from, to) {
-  const today = fmt(new Date());
   try {
-    const r = await fetch(`https://api.frankfurter.dev/v1/${today}?from=${from}&to=${to}`);
+    // Önce latest endpoint'ini dene (gerçek zamanlı)
+    const r = await fetch(`https://api.frankfurter.dev/v1/latest?from=${from}&to=${to}`);
     if (r.ok) {
       const data = await r.json();
       return data.rates?.[to] || null;
     }
+    // Eğer latest çalışmazsa bugünün tarihini kullan
+    const today = fmt(new Date());
+    const r2 = await fetch(`https://api.frankfurter.dev/v1/${today}?from=${from}&to=${to}`);
+    if (r2.ok) {
+      const data = await r2.json();
+      return data.rates?.[to] || null;
+    }
   } catch {}
   return null;
+}
+
+async function fetchLatestRates(currencies) {
+  try {
+    const rates = {};
+    await Promise.all(currencies.map(async (code) => {
+      const rate = await fetchLatestRate(code, "TRY");
+      if (rate !== null) {
+        rates[code] = rate;
+      }
+    }));
+    return rates;
+  } catch {}
+  return {};
 }
 
 function fmt(d) { return d.toISOString().split("T")[0]; }
@@ -62,13 +83,27 @@ export default function App() {
   const [convertTo, setConvertTo] = useState("TRY");
   const [convertRate, setConvertRate] = useState(null);
   const [convertLoading, setConvertLoading] = useState(false);
+  const [liveRates, setLiveRates] = useState({});
 
   useEffect(() => { 
     setReady(true);
     fetchCurrencies().then(data => {
       if (data) setCurrencies(data);
     });
-  }, []);
+    
+    // Live kur değerlerini yükle ve periyodik olarak güncelle
+    const updateLiveRates = async () => {
+      if (selectedCurrencies.length > 0) {
+        const rates = await fetchLatestRates(selectedCurrencies);
+        setLiveRates(rates);
+      }
+    };
+    
+    updateLiveRates();
+    const interval = setInterval(updateLiveRates, 30000); // Her 30 saniyede bir güncelle
+    
+    return () => clearInterval(interval);
+  }, [selectedCurrencies]);
 
   useEffect(() => {
     const handleClickOutside = (e) => {
@@ -161,11 +196,15 @@ export default function App() {
   
   const currencyData = selectedCurrencies.map((code, idx) => {
     const key = code.toLowerCase();
+    // Live kur değerini kullan, yoksa tarih aralığındaki en son değeri kullan
+    const liveVal = liveRates[code] != null ? liveRates[code] : null;
     const lastVal = last && last[key] != null ? last[key] : null;
+    const currentVal = liveVal != null ? liveVal : (lastVal != null ? lastVal : null);
     const prevVal = prev && prev[key] != null ? prev[key] : null;
     const firstVal = first && first[key] != null ? first[key] : null;
-    const change = lastVal != null && prevVal != null ? ((lastVal - prevVal) / prevVal) * 100 : 0;
-    const periodChange = lastVal != null && firstVal != null ? ((lastVal - firstVal) / firstVal) * 100 : 0;
+    // Değişim hesaplaması: live varsa prevVal ile, yoksa lastVal ile prevVal karşılaştır
+    const change = currentVal != null && prevVal != null ? ((currentVal - prevVal) / prevVal) * 100 : 0;
+    const periodChange = currentVal != null && firstVal != null ? ((currentVal - firstVal) / firstVal) * 100 : 0;
     const validValues = rows.length ? rows.map(r => r[key]).filter(v => v != null && typeof v === 'number' && !isNaN(v)) : [];
     const min = validValues.length > 0 ? Math.min(...validValues) : 0;
     const max = validValues.length > 0 ? Math.max(...validValues) : 0;
@@ -173,13 +212,14 @@ export default function App() {
     return {
       code,
       label: `${code} / TRY`,
-      value: lastVal != null ? lastVal : 0,
+      value: currentVal != null ? currentVal : 0,
       change,
       periodChange,
       min,
       max,
       data,
-      color: CURRENCY_COLORS[idx % CURRENCY_COLORS.length]
+      color: CURRENCY_COLORS[idx % CURRENCY_COLORS.length],
+      isLive: liveVal != null
     };
   });
 
@@ -291,7 +331,14 @@ export default function App() {
             {currencyData.filter(c => c.value != null && c.value > 0).map((c, i) => (
               <div key={c.code} style={S.card}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={S.clbl}>{c.label}</span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={S.clbl}>{c.label}</span>
+                    {c.isLive && (
+                      <span style={{ fontSize: 8, color: "#4ade80", fontWeight: 600, letterSpacing: 0.5, textTransform: "uppercase" }}>
+                        ● LIVE
+                      </span>
+                    )}
+                  </div>
                   <Chg v={c.change}/>
                 </div>
                 <div style={S.cval}>{typeof c.value === 'number' ? c.value.toFixed(4) : '0.0000'}</div>
